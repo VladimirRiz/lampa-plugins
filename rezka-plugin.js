@@ -7,9 +7,11 @@
 		max_quality: '720p',
 		sports_playlist: 'https://iptv-org.github.io/iptv/countries/ru.m3u',
 		mirrors: [
-			'https://hdrezka.me',
-			'https://rezka.ag',
-			'https://kinopub.me',
+			'https://rezka.pro',
+			'https://hdrezka.ac',
+			'https://hdrezka.vip',
+			'https://streamguard.cc', // Стриминговый прокси
+			'https://hdrezka.co',
 		],
 		trash_codes: ['@_@', '#h', '//_//', '@@', '!!!', '0^0'],
 	};
