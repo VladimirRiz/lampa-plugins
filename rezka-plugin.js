@@ -30,24 +30,59 @@
 
 	// Кнопка в карточке фильма
 	Lampa.Listener.follow('full', function (e) {
-		if (e.type == 'build') {
+		if (e.type == 'complite') {
 			var button = $(
-				'<div class="full-item__button" style="background: #e67e22;">' +
-					'<div class="full-item__icon" style="color: #fff;">🔥</div>' +
-					'<div>HDRezka Pro</div>' +
+				'<div class="full-start__button selector" style="background: #e67e22; border-radius: 0.3em;">' +
+					'<span>🔥 HDRezka Pro</span>' +
 					'</div>',
 			);
 			button.on('hover:enter', function () {
 				Lampa.Activity.push({
-					url: e.data.movie.title || e.data.movie.name,
+					url: '',
 					title: 'HDRezka Pro',
 					component: 'rezka_pro',
 					movie: e.data.movie,
+					page: 1,
 				});
 			});
-			e.html.find('.full-info__buttons').append(button);
+			var render = e.object.activity.render();
+			var container = render.find('.full-start-new__buttons');
+			if (!container.length) container = render.find('.full-start__buttons');
+			container.append(button);
 		}
 	});
+
+	// Управление пультом для компонентов (обязательные методы start/pause/stop)
+	function attachController(self, scroll) {
+		self.start = function () {
+			Lampa.Controller.add('content', {
+				toggle: function () {
+					Lampa.Controller.collectionSet(scroll.render());
+					Lampa.Controller.collectionFocus(false, scroll.render());
+				},
+				up: function () {
+					if (Navigator.canmove('up')) Navigator.move('up');
+					else Lampa.Controller.toggle('head');
+				},
+				down: function () {
+					if (Navigator.canmove('down')) Navigator.move('down');
+				},
+				left: function () {
+					if (Navigator.canmove('left')) Navigator.move('left');
+					else Lampa.Controller.toggle('menu');
+				},
+				right: function () {
+					if (Navigator.canmove('right')) Navigator.move('right');
+				},
+				back: function () {
+					Lampa.Activity.backward();
+				},
+			});
+			Lampa.Controller.toggle('content');
+		};
+		self.pause = function () {};
+		self.stop = function () {};
+	}
 
 	// Компонент HDRezka
 	function createRezkaComponent() {
@@ -66,6 +101,8 @@
 				currentMirrorIndex = 0;
 				searchOnRezka(object.movie.title || object.movie.name, object.movie);
 			};
+
+			attachController(this, scroll);
 
 			function searchOnRezka(query, movieData) {
 				setStatus('Searching ' + query + ' on ' + getBaseUrl() + '...');
@@ -310,6 +347,8 @@
 				);
 			};
 
+			attachController(this, scroll);
+
 			function parseM3U(data) {
 				var channels = [];
 				var lines = data.split('\n');
@@ -345,6 +384,7 @@
 					});
 					grid.append(item);
 				});
+				Lampa.Controller.toggle('content');
 			}
 
 			this.render = function () {
