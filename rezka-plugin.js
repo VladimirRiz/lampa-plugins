@@ -7,10 +7,9 @@
 		max_quality: '720p',
 		sports_playlist: 'https://iptv-org.github.io/iptv/countries/ru.m3u',
 		mirrors: [
-			'https://kinopub.me',
-			'https://hdrezka.co',
 			'https://hdrezka.me',
 			'https://rezka.ag',
+			'https://kinopub.me',
 		],
 		trash_codes: ['@_@', '#h', '//_//', '@@', '!!!', '0^0'],
 	};
