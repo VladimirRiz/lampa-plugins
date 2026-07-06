@@ -4,10 +4,23 @@
 	// Вся тяжёлая работа (парсинг HDRezka, обход защит, зеркала) делается
 	// на сервере Lampac. Клиент только ходит по его JSON API (rjson=true).
 	var config = {
-		version: '4.2.1',
+		version: '4.2.2',
 		host: 'https://beta.mitsu.tv/api',
 		sports_playlist: 'https://iptv-org.github.io/iptv/countries/ru.m3u',
 	};
+
+	// Подсветка выбранного пультом элемента (Lampa вешает класс .focus)
+	function injectStyles() {
+		if ($('style[data-rezka-pro]').length) return;
+		$('body').append(
+			'<style data-rezka-pro>' +
+				'.rezka-item.focus { background: #e67e22 !important; box-shadow: 0 0 0 0.15em #fff; transform: scale(1.01); }' +
+				'.rezka-item.focus div { color: #fff !important; }' +
+				'.rezka-voice.focus { box-shadow: 0 0 0 0.2em #fff; }' +
+				'.rezka-channel.focus { background: #e67e22 !important; box-shadow: 0 0 0 0.15em #fff; }' +
+				'</style>',
+		);
+	}
 
 	function addRjson(url) {
 		if (url.indexOf('rjson=') >= 0) return url;
@@ -173,13 +186,16 @@
 					);
 					json.voice.forEach(function (v) {
 						var vbtn = $(
-							'<div class="selector" style="padding: 0.4em 0.8em; border-radius: 0.3em; background: ' +
+							'<div class="selector rezka-voice" style="padding: 0.4em 0.8em; border-radius: 0.3em; background: ' +
 								(v.active ? '#e67e22' : '#333') +
 								'; color: #fff;"></div>',
 						).text(v.name);
 						vbtn.on('hover:enter', function () {
 							history.pop();
 							load(v.url, true);
+						});
+						vbtn.on('hover:focus', function (e) {
+							scroll.update($(e.target), true);
 						});
 						voiceRow.append(vbtn);
 					});
@@ -191,7 +207,7 @@
 						item.title || item.name || (item.translate ? item.translate : '???');
 					var details = item.details || item.info || item.quality_str || '';
 					var row = $(
-						'<div class="selector" style="background: #2a2a2a; margin-bottom: 0.5em; padding: 1em; border-radius: 0.4em;">' +
+						'<div class="selector rezka-item" style="background: #2a2a2a; margin-bottom: 0.5em; padding: 1em; border-radius: 0.4em;">' +
 							'<div style="color: #fff; font-weight: bold;"></div>' +
 							'<div style="color: #aaa; font-size: 0.9em;"></div>' +
 							'</div>',
@@ -203,6 +219,9 @@
 					row.on('hover:enter', function () {
 						if (item.method == 'link') load(item.url, true);
 						else playItem(item);
+					});
+					row.on('hover:focus', function (e) {
+						scroll.update($(e.target), true);
 					});
 					html.append(row);
 				});
@@ -349,13 +368,16 @@
 				var grid = html.find('.sports-grid');
 				channels.forEach(function (channel) {
 					var item = $(
-						'<div class="selector" style="background: #333; padding: 15px; border-radius: 8px; width: 200px; text-align: center; cursor: pointer;">' +
+						'<div class="selector rezka-channel" style="background: #333; padding: 15px; border-radius: 8px; width: 200px; text-align: center; cursor: pointer;">' +
 							'<div style="color: #fff; font-weight: bold;"></div>' +
 							'</div>',
 					);
 					item.children().first().text(channel.name);
 					item.on('hover:enter', function () {
 						Lampa.Player.play({ title: channel.name, url: channel.url });
+					});
+					item.on('hover:focus', function (e) {
+						scroll.update($(e.target), true);
 					});
 					grid.append(item);
 				});
@@ -395,6 +417,7 @@
 
 	// Старт
 	function startPlugin() {
+		injectStyles();
 		cleanupLegacyStorage();
 		createRezkaComponent();
 		createSportsComponent();
