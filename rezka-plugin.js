@@ -4,7 +4,7 @@
 	// Вся тяжёлая работа (парсинг HDRezka, обход защит, зеркала) делается
 	// на сервере Lampac. Клиент только ходит по его JSON API (rjson=true).
 	var config = {
-		version: '4.2.0',
+		version: '4.2.1',
 		host: 'https://beta.mitsu.tv/api',
 		sports_playlist: 'https://iptv-org.github.io/iptv/countries/ru.m3u',
 	};
@@ -375,8 +375,27 @@
 		});
 	}
 
+	// Чистка ключей Storage, оставшихся от старой скрейпинг-версии (до 4.0.0)
+	function cleanupLegacyStorage() {
+		try {
+			var prefixes = ['rezka_translator_', 'rezka_season_', 'rezka_episode_'];
+			for (var i = localStorage.length - 1; i >= 0; i--) {
+				var key = localStorage.key(i);
+				if (
+					key &&
+					prefixes.some(function (p) {
+						return key.indexOf(p) === 0;
+					})
+				) {
+					localStorage.removeItem(key);
+				}
+			}
+		} catch (e) {}
+	}
+
 	// Старт
 	function startPlugin() {
+		cleanupLegacyStorage();
 		createRezkaComponent();
 		createSportsComponent();
 		injectSportsMenu();
