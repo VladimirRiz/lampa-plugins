@@ -4,12 +4,8 @@
 	// Вся тяжёлая работа (парсинг HDRezka, обход защит, зеркала) делается
 	// на сервере Lampac. Клиент только ходит по его JSON API (rjson=true).
 	var config = {
-		version: '4.1.0',
-		// Пробуются по порядку: при ошибке первого запрос уходит на следующий
-		endpoints: [
-			'https://cors.lampa.stream/rezka',
-			'https://cors.lampa.stream/lite/rezka',
-		],
+		version: '4.2.0',
+		host: 'https://beta.mitsu.tv/api',
 		sports_playlist: 'https://iptv-org.github.io/iptv/countries/ru.m3u',
 	};
 
@@ -23,13 +19,13 @@
 		if (e.type == 'complite') {
 			var button = $(
 				'<div class="full-start__button selector" style="background: #e67e22; border-radius: 0.3em;">' +
-					'<span>🔥 HDRezka Pro</span>' +
+					'<span>🔥 Online Pro</span>' +
 					'</div>',
 			);
 			button.on('hover:enter', function () {
 				Lampa.Activity.push({
 					url: '',
-					title: 'HDRezka Pro',
+					title: 'Online Pro',
 					component: 'rezka_pro',
 					movie: e.data.movie,
 					page: 1,
@@ -93,9 +89,7 @@
 				);
 			}
 
-			var endpointIndex = 0;
-
-			function startUrl() {
+			function queryParams() {
 				var q = [];
 				q.push('id=' + encodeURIComponent(movie.id || ''));
 				q.push('title=' + encodeURIComponent(movie.title || movie.name || ''));
@@ -111,27 +105,38 @@
 				if (movie.imdb_id) q.push('imdb_id=' + encodeURIComponent(movie.imdb_id));
 				if (movie.kinopoisk_id)
 					q.push('kinopoisk_id=' + encodeURIComponent(movie.kinopoisk_id));
-				return config.endpoints[endpointIndex] + '?' + q.join('&');
+				return q.join('&');
 			}
 
 			this.create = function () {
 				loadStart();
 			};
 
-			// Первый запрос: при ошибке пробуем следующий endpoint из списка
+			// Первый уровень: список доступных источников с сервера Lampac
 			function loadStart() {
-				setStatus('Загрузка с ' + config.endpoints[endpointIndex] + '...');
+				setStatus('Загрузка источников с ' + config.host + '...');
 				network.silent(
-					addRjson(startUrl()),
-					function (json) {
+					config.host + '/lite/events?' + queryParams(),
+					function (sources) {
+						if (!sources || !sources.length) {
+							setStatus('Нет доступных источников.');
+							return;
+						}
+						var json = {
+							type: 'sources',
+							data: sources.map(function (s) {
+								return {
+									method: 'link',
+									name: String(s.name || s.balanser).replace(/<[^>]+>/g, ''),
+									url: s.url + '?' + queryParams(),
+								};
+							}),
+						};
 						history.push(json);
 						renderJson(json);
 					},
 					function () {
-						if (endpointIndex < config.endpoints.length - 1) {
-							endpointIndex++;
-							loadStart();
-						} else setStatus('Сервер недоступен.');
+						setStatus('Сервер ' + config.host + ' недоступен.');
 					},
 					false,
 					{ dataType: 'json' },
