@@ -4,7 +4,7 @@
 	// Вся тяжёлая работа (парсинг HDRezka, обход защит, зеркала) делается
 	// на сервере Lampac. Клиент только ходит по его JSON API (rjson=true).
 	var config = {
-		version: '4.2.2',
+		version: '4.2.3',
 		host: 'https://beta.mitsu.tv/api',
 		sports_playlist: 'https://iptv-org.github.io/iptv/countries/ru.m3u',
 	};
@@ -52,11 +52,14 @@
 	});
 
 	// Управление пультом для компонентов (обязательные методы start/pause/stop)
-	function attachController(self, scroll, onBack) {
+	function attachController(self, scroll, onBack, files) {
 		self.start = function () {
 			Lampa.Controller.add('content', {
 				toggle: function () {
-					Lampa.Controller.collectionSet(scroll.render());
+					Lampa.Controller.collectionSet(
+						scroll.render(),
+						files ? files.render() : null,
+					);
 					Lampa.Controller.collectionFocus(false, scroll.render());
 				},
 				up: function () {
@@ -89,6 +92,9 @@
 		Lampa.Component.add('rezka_pro', function (object) {
 			var network = new Lampa.Reguest();
 			var scroll = new Lampa.Scroll({ mask: true, over: true });
+			// Explorer даёт списку каркас с ограниченной высотой — без него
+			// контейнер растягивается и скроллу нечего прокручивать
+			var files = new Lampa.Explorer(object);
 			var html = $('<div class="rezka-list" style="padding: 1em;"></div>');
 			var movie = object.movie;
 			// Стек уровней навигации: похожие → сезоны → серии
@@ -122,6 +128,10 @@
 			}
 
 			this.create = function () {
+				scroll.body().addClass('torrent-list');
+				scroll.append(html);
+				files.appendFiles(scroll.render());
+				scroll.minus(files.render().find('.explorer__files-head'));
 				loadStart();
 			};
 
@@ -273,23 +283,28 @@
 				});
 			}
 
-			attachController(this, scroll, function () {
-				// Назад по уровням: серии → сезоны → похожие
-				if (history.length > 1) {
-					history.pop();
-					renderJson(history[history.length - 1]);
-					return true;
-				}
-				return false;
-			});
+			attachController(
+				this,
+				scroll,
+				function () {
+					// Назад по уровням: серии → сезоны → похожие
+					if (history.length > 1) {
+						history.pop();
+						renderJson(history[history.length - 1]);
+						return true;
+					}
+					return false;
+				},
+				files,
+			);
 
 			this.render = function () {
-				scroll.append(html);
-				return scroll.render();
+				return files.render();
 			};
 			this.destroy = function () {
 				network.clear();
 				scroll.destroy();
+				files.destroy();
 				html.empty();
 				html.remove();
 			};
