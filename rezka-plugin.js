@@ -4,9 +4,12 @@
 	// Вся тяжёлая работа (парсинг HDRezka, обход защит, зеркала) делается
 	// на сервере Lampac. Клиент только ходит по его JSON API (rjson=true).
 	var config = {
-		version: '4.0.0',
-		lampac_host: 'https://lpc.bwa.to',
-		balanser: 'rezka',
+		version: '4.1.0',
+		// Пробуются по порядку: при ошибке первого запрос уходит на следующий
+		endpoints: [
+			'https://cors.lampa.stream/rezka',
+			'https://cors.lampa.stream/lite/rezka',
+		],
 		sports_playlist: 'https://iptv-org.github.io/iptv/countries/ru.m3u',
 	};
 
@@ -90,6 +93,8 @@
 				);
 			}
 
+			var endpointIndex = 0;
+
 			function startUrl() {
 				var q = [];
 				q.push('id=' + encodeURIComponent(movie.id || ''));
@@ -106,13 +111,32 @@
 				if (movie.imdb_id) q.push('imdb_id=' + encodeURIComponent(movie.imdb_id));
 				if (movie.kinopoisk_id)
 					q.push('kinopoisk_id=' + encodeURIComponent(movie.kinopoisk_id));
-				return config.lampac_host + '/lite/' + config.balanser + '?' + q.join('&');
+				return config.endpoints[endpointIndex] + '?' + q.join('&');
 			}
 
 			this.create = function () {
-				setStatus('Загрузка с ' + config.lampac_host + '...');
-				load(startUrl(), true);
+				loadStart();
 			};
+
+			// Первый запрос: при ошибке пробуем следующий endpoint из списка
+			function loadStart() {
+				setStatus('Загрузка с ' + config.endpoints[endpointIndex] + '...');
+				network.silent(
+					addRjson(startUrl()),
+					function (json) {
+						history.push(json);
+						renderJson(json);
+					},
+					function () {
+						if (endpointIndex < config.endpoints.length - 1) {
+							endpointIndex++;
+							loadStart();
+						} else setStatus('Сервер недоступен.');
+					},
+					false,
+					{ dataType: 'json' },
+				);
+			}
 
 			function load(url, pushHistory) {
 				network.silent(
@@ -122,7 +146,7 @@
 						renderJson(json);
 					},
 					function () {
-						setStatus('Сервер ' + config.lampac_host + ' недоступен.');
+						setStatus('Ошибка загрузки.');
 					},
 					false,
 					{ dataType: 'json' },
