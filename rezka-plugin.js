@@ -1,32 +1,18 @@
 (function () {
 	'use strict';
 
-	// Все настройки теперь хранятся прямо здесь, никаких внешних JSON файлов!
-	var remoteConfig = {
-		version: '3.0.0',
-		max_quality: '720p',
+	// Вся тяжёлая работа (парсинг HDRezka, обход защит, зеркала) делается
+	// на сервере Lampac. Клиент только ходит по его JSON API (rjson=true).
+	var config = {
+		version: '4.0.0',
+		lampac_host: 'https://lpc.bwa.to',
+		balanser: 'rezka',
 		sports_playlist: 'https://iptv-org.github.io/iptv/countries/ru.m3u',
-		mirrors: [
-			'https://rezka.pro',
-			'https://hdrezka.ac',
-			'https://hdrezka.vip',
-			'https://streamguard.cc', // Стриминговый прокси
-			'https://hdrezka.co',
-		],
-		trash_codes: ['@_@', '#h', '//_//', '@@', '!!!', '0^0'],
 	};
 
-	var currentMirrorIndex = 0;
-	function getBaseUrl() {
-		return remoteConfig.mirrors[currentMirrorIndex];
-	}
-	function nextMirror() {
-		currentMirrorIndex++;
-		if (currentMirrorIndex >= remoteConfig.mirrors.length) {
-			currentMirrorIndex = 0;
-			return false;
-		}
-		return true;
+	function addRjson(url) {
+		if (url.indexOf('rjson=') >= 0) return url;
+		return url + (url.indexOf('?') >= 0 ? '&' : '?') + 'rjson=true';
 	}
 
 	// Кнопка в карточке фильма
@@ -54,7 +40,7 @@
 	});
 
 	// Управление пультом для компонентов (обязательные методы start/pause/stop)
-	function attachController(self, scroll) {
+	function attachController(self, scroll, onBack) {
 		self.start = function () {
 			Lampa.Controller.add('content', {
 				toggle: function () {
@@ -76,6 +62,7 @@
 					if (Navigator.canmove('right')) Navigator.move('right');
 				},
 				back: function () {
+					if (onBack && onBack()) return;
 					Lampa.Activity.backward();
 				},
 			});
@@ -85,216 +72,175 @@
 		self.stop = function () {};
 	}
 
-	// Компонент HDRezka
+	// Компонент HDRezka через Lampac
 	function createRezkaComponent() {
 		Lampa.Component.add('rezka_pro', function (object) {
-			var comp_network = new Lampa.Reguest();
+			var network = new Lampa.Reguest();
 			var scroll = new Lampa.Scroll({ mask: true, over: true });
-			var html = $(
-				'<div><div class="rezka-status" style="padding: 2em; text-align: center; font-size: 1.2em; color: #fff;">Searching...</div></div>',
-			);
+			var html = $('<div class="rezka-list" style="padding: 1em;"></div>');
+			var movie = object.movie;
+			// Стек уровней навигации: похожие → сезоны → серии
+			var history = [];
 
 			function setStatus(text) {
-				html.find('.rezka-status').text(text);
+				html.empty().append(
+					$(
+						'<div style="padding: 2em; text-align: center; font-size: 1.2em; color: #fff;"></div>',
+					).text(text),
+				);
+			}
+
+			function startUrl() {
+				var q = [];
+				q.push('id=' + encodeURIComponent(movie.id || ''));
+				q.push('title=' + encodeURIComponent(movie.title || movie.name || ''));
+				q.push(
+					'original_title=' +
+						encodeURIComponent(movie.original_title || movie.original_name || ''),
+				);
+				q.push('serial=' + (movie.name ? 1 : 0));
+				q.push(
+					'year=' +
+						String(movie.release_date || movie.first_air_date || '0000').slice(0, 4),
+				);
+				if (movie.imdb_id) q.push('imdb_id=' + encodeURIComponent(movie.imdb_id));
+				if (movie.kinopoisk_id)
+					q.push('kinopoisk_id=' + encodeURIComponent(movie.kinopoisk_id));
+				return config.lampac_host + '/lite/' + config.balanser + '?' + q.join('&');
 			}
 
 			this.create = function () {
-				currentMirrorIndex = 0;
-				searchOnRezka(object.movie.title || object.movie.name, object.movie);
+				setStatus('Загрузка с ' + config.lampac_host + '...');
+				load(startUrl(), true);
 			};
 
-			attachController(this, scroll);
-
-			function searchOnRezka(query, movieData) {
-				setStatus('Searching ' + query + ' on ' + getBaseUrl() + '...');
-				var url =
-					getBaseUrl() +
-					'/search/?do=search&subaction=search&q=' +
-					encodeURIComponent(query);
-
-				comp_network.silent(
-					url,
-					function (pageHtml) {
-						if (
-							pageHtml.includes('Cloudflare') ||
-							pageHtml.includes('Just a moment')
-						) {
-							setStatus('Cloudflare protection. Changing mirror...');
-							if (nextMirror()) searchOnRezka(query, movieData);
-							else setStatus('All mirrors blocked.');
-							return;
-						}
-						try {
-							var parser = new DOMParser();
-							var doc = parser.parseFromString(pageHtml, 'text/html');
-							var items = doc.querySelectorAll('.b-content__inline_item');
-							if (items.length === 0) return setStatus('Not found.');
-
-							var titleElement = items[0].querySelector(
-								'.b-content__inline_item-link a',
-							);
-							if (titleElement) {
-								setStatus('Found! Preparing video...');
-								getMoviePage(titleElement.href, movieData);
-							}
-						} catch (err) {
-							setStatus('Search parsing error.');
-						}
+			function load(url, pushHistory) {
+				network.silent(
+					addRjson(url),
+					function (json) {
+						if (pushHistory) history.push(json);
+						renderJson(json);
 					},
 					function () {
-						if (nextMirror()) searchOnRezka(query, movieData);
-						else setStatus('Mirrors unavailable.');
+						setStatus('Сервер ' + config.lampac_host + ' недоступен.');
 					},
 					false,
-					{ dataType: 'text' },
+					{ dataType: 'json' },
 				);
 			}
 
-			function getMoviePage(url, movieData) {
-				comp_network.silent(
-					url,
-					function (pageHtml) {
-						try {
-							var postIdMatch = pageHtml.match(/id="post_id"\s+value="(\d+)"/);
-							if (!postIdMatch) throw new Error('post_id not found');
-							var postId = postIdMatch[1];
-
-							var savedTranslator = Lampa.Storage.get(
-								'rezka_translator_' + postId,
-								null,
-							);
-							var translatorId =
-								savedTranslator ||
-								(pageHtml.match(/id="translator_id"\s+value="(\d+)"/)
-									? pageHtml.match(/id="translator_id"\s+value="(\d+)"/)[1]
-									: '1');
-
-							var trashCodes = extractTrashDynamically(pageHtml);
-							getVideoStream(postId, translatorId, movieData, trashCodes);
-						} catch (err) {
-							setStatus('Movie data error.');
-						}
-					},
-					false,
-					false,
-					{ dataType: 'text' },
-				);
-			}
-
-			function extractTrashDynamically(pageHtml) {
-				var trashList = remoteConfig.trash_codes.slice();
-				var scriptBlocks =
-					pageHtml.match(/<script.*?>([\s\S]*?)<\/script>/g) || [];
-				scriptBlocks.forEach(function (script) {
-					if (
-						script.includes('join') &&
-						script.includes('split') &&
-						!script.includes('src=')
-					) {
-						var matches = script.match(/(["'])(.*?)\1/g);
-						if (matches) {
-							matches.forEach(function (m) {
-								var cleanStr = m.replace(/["']/g, '');
-								if (cleanStr.length > 0 && cleanStr.length < 10)
-									trashList.push(cleanStr);
-							});
-						}
-					}
-				});
-
-				var uniqueTrash = [];
-				trashList.forEach(function (item) {
-					if (uniqueTrash.indexOf(item) === -1) uniqueTrash.push(item);
-				});
-				return uniqueTrash;
-			}
-
-			function getVideoStream(postId, translatorId, movieData, trashCodes) {
-				var isTvShow = movieData.type === 'tv';
-				var postData =
-					'id=' +
-					postId +
-					'&translator_id=' +
-					translatorId +
-					'&action=' +
-					(isTvShow ? 'get_episodes' : 'get_movie');
-
-				if (isTvShow) {
-					var lastSeason = Lampa.Storage.get('rezka_season_' + postId, 1);
-					var lastEpisode = Lampa.Storage.get('rezka_episode_' + postId, 1);
-					postData += '&season=' + lastSeason + '&episode=' + lastEpisode;
+			function renderJson(json) {
+				var items = json && (json.data || json.episodes || []);
+				if (!json || !items.length) {
+					setStatus('Ничего не найдено.');
+					return;
 				}
+				html.empty();
 
-				comp_network.silent(
-					getBaseUrl() + '/ajax/get_play_video/',
-					function (response) {
-						if (response && response.success && response.url) {
-							var qualities = decryptRezkaUrl(response.url, trashCodes);
-							if (qualities) {
-								setStatus('Ready!');
-								playVideo(qualities, movieData);
-							} else setStatus('Decryption error.');
-						} else setStatus('HDRezka server error.');
-					},
-					false,
-					postData,
-					{
-						dataType: 'json',
-						headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-					},
-				);
-			}
-
-			function decryptRezkaUrl(encodedString, trashCodes) {
-				try {
-					var cleanedString = encodedString;
-					trashCodes.forEach(function (trash) {
-						var regex = new RegExp(
-							trash.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
-							'g',
-						);
-						cleanedString = cleanedString.replace(regex, '');
-					});
-					var decodedText = atob(
-						cleanedString.replace(/[^A-Za-z0-9+\/=]/g, ''),
+				// Переключение озвучки
+				if (json.voice && json.voice.length) {
+					var voiceRow = $(
+						'<div style="display: flex; flex-wrap: wrap; gap: 0.5em; margin-bottom: 1em;"></div>',
 					);
-
-					var qualities = {};
-					decodedText.split(',').forEach(function (linkInfo) {
-						var match = linkInfo.match(/\[(\d+p)\](http.*)/);
-						if (match) qualities[match[1]] = match[2].split(' or ')[0];
+					json.voice.forEach(function (v) {
+						var vbtn = $(
+							'<div class="selector" style="padding: 0.4em 0.8em; border-radius: 0.3em; background: ' +
+								(v.active ? '#e67e22' : '#333') +
+								'; color: #fff;"></div>',
+						).text(v.name);
+						vbtn.on('hover:enter', function () {
+							history.pop();
+							load(v.url, true);
+						});
+						voiceRow.append(vbtn);
 					});
-					return qualities;
-				} catch (e) {
-					return null;
+					html.append(voiceRow);
+				}
+
+				items.forEach(function (item) {
+					var label =
+						item.title || item.name || (item.translate ? item.translate : '???');
+					var details = item.details || item.info || item.quality_str || '';
+					var row = $(
+						'<div class="selector" style="background: #2a2a2a; margin-bottom: 0.5em; padding: 1em; border-radius: 0.4em;">' +
+							'<div style="color: #fff; font-weight: bold;"></div>' +
+							'<div style="color: #aaa; font-size: 0.9em;"></div>' +
+							'</div>',
+					);
+					row.children().first().text(label);
+					if (details) row.children().last().text(details);
+					else row.children().last().remove();
+
+					row.on('hover:enter', function () {
+						if (item.method == 'link') load(item.url, true);
+						else playItem(item);
+					});
+					html.append(row);
+				});
+
+				Lampa.Controller.toggle('content');
+				scroll.update(html, true);
+			}
+
+			function playItem(item) {
+				if (item.method == 'play') {
+					startPlayer(item);
+				} else {
+					// method == 'call': ещё один запрос за финальной ссылкой
+					setStatus('Получение видео...');
+					network.silent(
+						addRjson(item.url),
+						function (json) {
+							var last = history[history.length - 1];
+							if (last) renderJson(last);
+							if (json && json.url) {
+								json.title = json.title || item.title || item.name;
+								json.s = item.s;
+								json.e = item.e;
+								startPlayer(json);
+							} else Lampa.Noty.show('Не удалось получить ссылку на видео.');
+						},
+						function () {
+							Lampa.Noty.show('Ошибка запроса видео.');
+						},
+						false,
+						{ dataType: 'json' },
+					);
 				}
 			}
 
-			function playVideo(qualities, movieData) {
-				if (!qualities || Object.keys(qualities).length === 0) return;
-				var maxQuality = remoteConfig.max_quality || '720p';
-				var selectedUrl =
-					qualities[maxQuality] ||
-					qualities['720p'] ||
-					qualities[Object.keys(qualities)[0]];
-
+			function startPlayer(item) {
+				var hash = [movie.id, item.s || 0, item.e || 0].join('_');
 				Lampa.Player.play({
-					title: movieData.title || movieData.name,
-					url: selectedUrl,
-					quality: qualities,
+					title:
+						(movie.title || movie.name) +
+						(item.e ? ' / ' + (item.name || 'Серия ' + item.e) : ''),
+					url: item.url,
+					quality: item.quality,
+					subtitles: item.subtitles,
 					timeline: {
-						hash: 'rezka_' + movieData.id,
-						title: movieData.title || movieData.name,
+						hash: 'rezka_' + hash,
+						title: movie.title || movie.name,
 					},
 				});
 			}
+
+			attachController(this, scroll, function () {
+				// Назад по уровням: серии → сезоны → похожие
+				if (history.length > 1) {
+					history.pop();
+					renderJson(history[history.length - 1]);
+					return true;
+				}
+				return false;
+			});
 
 			this.render = function () {
 				scroll.append(html);
 				return scroll.render();
 			};
 			this.destroy = function () {
-				comp_network.clear();
+				network.clear();
 				scroll.destroy();
 				html.empty();
 				html.remove();
@@ -329,12 +275,12 @@
 			);
 
 			this.create = function () {
-				if (!remoteConfig.sports_playlist) {
+				if (!config.sports_playlist) {
 					html.find('.sports-status').text('M3U playlist link is empty.');
 					return;
 				}
 				comp_network.silent(
-					remoteConfig.sports_playlist,
+					config.sports_playlist,
 					function (m3uData) {
 						html.find('.sports-status').remove();
 						var channels = parseM3U(m3uData);
@@ -375,11 +321,10 @@
 				channels.forEach(function (channel) {
 					var item = $(
 						'<div class="selector" style="background: #333; padding: 15px; border-radius: 8px; width: 200px; text-align: center; cursor: pointer;">' +
-							'<div style="color: #fff; font-weight: bold;">' +
-							channel.name +
-							'</div>' +
+							'<div style="color: #fff; font-weight: bold;"></div>' +
 							'</div>',
 					);
+					item.children().first().text(channel.name);
 					item.on('hover:enter', function () {
 						Lampa.Player.play({ title: channel.name, url: channel.url });
 					});
