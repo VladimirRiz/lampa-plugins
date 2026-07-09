@@ -4,7 +4,7 @@
 	// Вся тяжёлая работа (парсинг источников, обход защит, зеркала) делается
 	// на сервере Lampac. Клиент только ходит по его JSON API (rjson=true).
 	var config = {
-		version: '4.4.0',
+		version: '4.5.0',
 		// Запасные хосты: пробуются по порядку, хост из настроек — первым
 		hosts: ['https://beta.mitsu.tv/api'],
 		sports_playlist: 'https://iptv-org.github.io/iptv/countries/ru.m3u',
@@ -51,6 +51,46 @@
 	function addRjson(url) {
 		if (url.indexOf('rjson=') >= 0) return url;
 		return url + (url.indexOf('?') >= 0 ? '&' : '?') + 'rjson=true';
+	}
+
+	// Кеш ответов сервера: повторное открытие тех же списков — без сети
+	var CACHE_TTL = 10 * 60 * 1000;
+
+	function cacheGet(url) {
+		try {
+			var all = Lampa.Storage.get('rezka_pro_cache', {});
+			var hit = all[url];
+			if (hit && Date.now() - hit.t < CACHE_TTL) return hit.json;
+		} catch (e) {}
+		return null;
+	}
+
+	function cacheSet(url, json) {
+		try {
+			var all = Lampa.Storage.get('rezka_pro_cache', {});
+			Object.keys(all).forEach(function (k) {
+				if (Date.now() - all[k].t > CACHE_TTL) delete all[k];
+			});
+			var keys = Object.keys(all);
+			if (keys.length >= 30) {
+				keys.sort(function (a, b) {
+					return all[a].t - all[b].t;
+				});
+				delete all[keys[0]];
+			}
+			all[url] = { t: Date.now(), json: json };
+			Lampa.Storage.set('rezka_pro_cache', all);
+		} catch (e) {}
+	}
+
+	// Рейтинг источников: удачные ответы поднимают источник в очереди опроса
+	function bumpRating(balanser, ok) {
+		if (!balanser) return;
+		try {
+			var r = Lampa.Storage.get('rezka_pro_rating', {});
+			r[balanser] = (r[balanser] || 0) + (ok ? 1 : -1);
+			Lampa.Storage.set('rezka_pro_rating', r);
+		} catch (e) {}
 	}
 
 	function resumeKey(movie) {
@@ -269,8 +309,8 @@
 					'Продолжаю' + (resume.label ? ': ' + resume.label : '') + '...',
 					true,
 				);
-				network.silent(
-					addRjson(resume.listUrl),
+				fetchJson(
+					resume.listUrl,
 					function (json) {
 						var items = (json && (json.data || json.episodes)) || [];
 						var target = null;
@@ -306,16 +346,30 @@
 					function () {
 						loadStart();
 					},
+				);
+			}
+
+			// Запрос JSON с кешем: повторные открытия — мгновенные
+			function fetchJson(url, ok, fail) {
+				var cached = cacheGet(url);
+				if (cached) return ok(cached);
+				network.silent(
+					addRjson(url),
+					function (json) {
+						cacheSet(url, json);
+						ok(json);
+					},
+					fail,
 					false,
 					{ dataType: 'json' },
 				);
 			}
 
-			// Первый уровень: список доступных источников с сервера Lampac.
-			// Запомненный источник открывается сразу, список остаётся на «назад»
+			// Первый уровень: список источников с сервера Lampac. Запомненный —
+			// первым в очереди, дальше по рейтингу удачных ответов
 			function loadStart() {
 				setStatus('Загрузка источников с ' + currentHost() + '...', true);
-				network.silent(
+				fetchJson(
 					currentHost() + '/lite/events?' + queryParams(),
 					function (sources) {
 						if (!sources || !sources.length) {
@@ -323,25 +377,25 @@
 							return;
 						}
 						var saved = Lampa.Storage.get('rezka_pro_source', '');
-						var savedItem = null;
-						var json = {
-							type: 'sources',
-							data: sources.map(function (s) {
-								var item = {
-									method: 'link',
-									balanser: s.balanser,
-									name:
-										String(s.name || s.balanser).replace(/<[^>]+>/g, '') +
-										(s.balanser === saved ? ' ✓' : ''),
-									url: s.url + '?' + queryParams(),
-								};
-								if (s.balanser === saved) savedItem = item;
-								return item;
-							}),
-						};
+						var rating = Lampa.Storage.get('rezka_pro_rating', {});
+						var data = sources.map(function (s) {
+							return {
+								method: 'link',
+								balanser: s.balanser,
+								name:
+									String(s.name || s.balanser).replace(/<[^>]+>/g, '') +
+									(s.balanser === saved ? ' ✓' : ''),
+								url: s.url + '?' + queryParams(),
+							};
+						});
+						data.sort(function (a, b) {
+							if (a.balanser === saved) return -1;
+							if (b.balanser === saved) return 1;
+							return (rating[b.balanser] || 0) - (rating[a.balanser] || 0);
+						});
+						var json = { type: 'sources', data: data };
 						history.push(json);
-						if (savedItem) load(savedItem.url, true);
-						else renderJson(json);
+						probeSources(json);
 					},
 					function () {
 						if (hostIndex < hosts.length - 1) {
@@ -349,15 +403,77 @@
 							loadStart();
 						} else setStatus('Серверы недоступны: ' + hosts.join(', '));
 					},
-					false,
-					{ dataType: 'json' },
 				);
+			}
+
+			// Автоперебор: опрашиваем источники по 3 параллельно и открываем
+			// первый, у которого есть контент. Проверенные помечаются ✓/✗ —
+			// отметки видны в списке источников по кнопке «назад»
+			function probeSources(sourcesJson) {
+				var queue = sourcesJson.data.slice();
+				var total = queue.length;
+				var opened = false;
+				var active = 0;
+				var checked = 0;
+
+				setStatus('Ищу рабочий источник (0/' + total + ')...', true);
+
+				function finishProbe(item, json, ok) {
+					checked++;
+					item.info = ok ? '✓ доступен' : '✗ ничего не вернул';
+					bumpRating(item.balanser, ok);
+					if (opened) return;
+					if (ok) {
+						opened = true;
+						currentListUrl = item.url;
+						Lampa.Noty.show('Источник: ' + item.name.replace(' ✓', ''));
+						history.push(json);
+						renderJson(json);
+					} else if (queue.length || active) {
+						setStatus(
+							'Ищу рабочий источник (' + checked + '/' + total + ')...',
+							true,
+						);
+						next();
+					} else {
+						// Всё пусто: показываем список с отметками для ручного выбора
+						Lampa.Noty.show('Ни один источник не ответил.');
+						renderJson(sourcesJson);
+					}
+				}
+
+				function probe(item) {
+					active++;
+					fetchJson(
+						item.url,
+						function (json) {
+							active--;
+							var ok = !!(
+								json &&
+								((json.data && json.data.length) ||
+									(json.episodes && json.episodes.length))
+							);
+							finishProbe(item, json, ok);
+						},
+						function () {
+							active--;
+							finishProbe(item, null, false);
+						},
+					);
+				}
+
+				function next() {
+					if (opened) return;
+					while (active < 3 && queue.length) probe(queue.shift());
+				}
+
+				next();
 			}
 
 			function load(url, pushHistory) {
 				setStatus('Загрузка...', true);
-				network.silent(
-					addRjson(url),
+				fetchJson(
+					url,
 					function (json) {
 						currentListUrl = url;
 						if (pushHistory) history.push(json);
@@ -366,8 +482,6 @@
 					function () {
 						showMessage('Ошибка загрузки. Попробуйте другой источник.');
 					},
-					false,
-					{ dataType: 'json' },
 				);
 			}
 
@@ -466,6 +580,7 @@
 						listUrl: currentListUrl,
 						s: item.s || 0,
 						e: item.e || 0,
+						card: movie.title || movie.name || '',
 						title: item.title || item.name || '',
 						label: item.s
 							? item.s + ' сезон, ' + (item.e || '?') + ' серия'
@@ -664,23 +779,105 @@
 				});
 			}
 
+			function favList() {
+				return Lampa.Storage.get('rezka_pro_tv_fav', []);
+			}
+
+			// Долгое нажатие ОК на канале — добавить/убрать из избранного
+			function toggleFav(channel) {
+				try {
+					var fav = favList();
+					var idx = fav.indexOf(channel.name);
+					if (idx >= 0) {
+						fav.splice(idx, 1);
+						Lampa.Noty.show('Убрано из избранного');
+					} else {
+						fav.push(channel.name);
+						Lampa.Noty.show('В избранном: ' + channel.name);
+					}
+					Lampa.Storage.set('rezka_pro_tv_fav', fav);
+				} catch (e) {}
+			}
+
+			function allChannels() {
+				var list = [];
+				allGroups.forEach(function (g) {
+					list = list.concat(g.channels);
+				});
+				return list;
+			}
+
+			function groupRow(title, subtitle, onEnter) {
+				var row = $(
+					'<div class="selector rezka-item" style="background: #2a2a2a; margin-bottom: 0.5em; padding: 1em; border-radius: 0.4em;">' +
+						'<div style="color: #fff; font-weight: bold;"></div>' +
+						'<div style="color: #aaa; font-size: 0.9em;"></div>' +
+						'</div>',
+				);
+				row.children().first().text(title);
+				if (subtitle) row.children().last().text(subtitle);
+				else row.children().last().remove();
+				row.on('hover:enter', onEnter);
+				row.on('hover:focus', focusFollow);
+				return row;
+			}
+
+			function openSearch() {
+				try {
+					Lampa.Input.edit(
+						{ free: true, nosave: true, value: '' },
+						function (value) {
+							if (value) {
+								var q = value.toLowerCase();
+								var found = allChannels().filter(function (c) {
+									return c.name.toLowerCase().indexOf(q) >= 0;
+								});
+								if (found.length)
+									renderChannels({ name: 'Поиск: ' + value, channels: found });
+								else {
+									Lampa.Noty.show('Ничего не найдено.');
+									Lampa.Controller.toggle('content');
+								}
+							} else Lampa.Controller.toggle('content');
+						},
+					);
+				} catch (e) {
+					Lampa.Noty.show('Поиск недоступен в этой версии Lampa.');
+				}
+			}
+
 			function renderGroups() {
 				openedGroup = null;
 				html.empty();
-				allGroups.forEach(function (group) {
-					var row = $(
-						'<div class="selector rezka-item" style="background: #2a2a2a; margin-bottom: 0.5em; padding: 1em; border-radius: 0.4em;">' +
-							'<div style="color: #fff; font-weight: bold;"></div>' +
-							'<div style="color: #aaa; font-size: 0.9em;"></div>' +
-							'</div>',
-					);
-					row.children().first().text(group.name);
-					row.children().last().text('Каналов: ' + group.channels.length);
-					row.on('hover:enter', function () {
-						renderChannels(group);
+
+				html.append(groupRow('🔍 Поиск канала', '', openSearch));
+
+				var fav = favList();
+				if (fav.length) {
+					var favChannels = allChannels().filter(function (c) {
+						return fav.indexOf(c.name) >= 0;
 					});
-					row.on('hover:focus', focusFollow);
-					html.append(row);
+					if (favChannels.length)
+						html.append(
+							groupRow(
+								'⭐ Избранное',
+								'Каналов: ' + favChannels.length,
+								function () {
+									renderChannels({
+										name: '⭐ Избранное',
+										channels: favChannels,
+									});
+								},
+							),
+						);
+				}
+
+				allGroups.forEach(function (group) {
+					html.append(
+						groupRow(group.name, 'Каналов: ' + group.channels.length, function () {
+							renderChannels(group);
+						}),
+					);
 				});
 				Lampa.Controller.toggle('content');
 				scroll.update(html, true);
@@ -705,9 +902,16 @@
 						});
 						row.prepend(logo);
 					}
-					row.children().last().text(channel.name);
+					var isFav = favList().indexOf(channel.name) >= 0;
+					row
+						.children()
+						.last()
+						.text((isFav ? '⭐ ' : '') + channel.name);
 					row.on('hover:enter', function () {
 						Lampa.Player.play({ title: channel.name, url: channel.url });
+					});
+					row.on('hover:long', function () {
+						toggleFav(channel);
 					});
 					row.on('hover:focus', focusFollow);
 					html.append(row);
@@ -783,6 +987,62 @@
 		});
 	}
 
+	// Проверка новых серий у недосмотренных сериалов (по закладкам
+	// «Продолжить»): сравниваем число серий в сезоне с последней запущенной
+	function checkNewEpisodes() {
+		try {
+			var entries = [];
+			for (var i = 0; i < localStorage.length; i++) {
+				var key = localStorage.key(i);
+				if (key && key.indexOf('rezka_pro_resume_') === 0) {
+					var data = Lampa.Storage.get(key, null);
+					if (data && data.s && data.listUrl && data.card)
+						entries.push({ key: key, data: data });
+				}
+			}
+			// Не больше пяти самых свежих, по одному запросу за раз
+			entries.sort(function (a, b) {
+				return (b.data.time || 0) - (a.data.time || 0);
+			});
+			entries = entries.slice(0, 5);
+
+			var net = new Lampa.Reguest();
+
+			function step(idx) {
+				if (idx >= entries.length) return;
+				var entry = entries[idx];
+				net.silent(
+					addRjson(entry.data.listUrl),
+					function (json) {
+						var items = (json && (json.data || [])) || [];
+						var maxEpisode = 0;
+						items.forEach(function (it) {
+							if (it.e && it.e > maxEpisode) maxEpisode = it.e;
+						});
+						if (
+							maxEpisode > (entry.data.e || 0) &&
+							maxEpisode > (entry.data.notified_e || 0)
+						) {
+							Lampa.Noty.show(
+								'Вышла ' + maxEpisode + ' серия — ' + entry.data.card,
+							);
+							entry.data.notified_e = maxEpisode;
+							Lampa.Storage.set(entry.key, entry.data);
+						}
+						step(idx + 1);
+					},
+					function () {
+						step(idx + 1);
+					},
+					false,
+					{ dataType: 'json' },
+				);
+			}
+
+			step(0);
+		} catch (e) {}
+	}
+
 	// Чистка ключей Storage, оставшихся от старой скрейпинг-версии (до 4.0.0)
 	function cleanupLegacyStorage() {
 		try {
@@ -809,6 +1069,8 @@
 		createRezkaComponent();
 		createSportsComponent();
 		injectSportsMenu();
+		// Проверяем новые серии, когда интерфейс уже загрузился
+		setTimeout(checkNewEpisodes, 10000);
 	}
 
 	if (window.appready) startPlugin();
