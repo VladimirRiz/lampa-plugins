@@ -4,7 +4,7 @@
 	// Вся тяжёлая работа (парсинг источников, обход защит, зеркала) делается
 	// на сервере Lampac. Клиент только ходит по его JSON API (rjson=true).
 	var config = {
-		version: '4.3.0',
+		version: '4.4.0',
 		// Запасные хосты: пробуются по порядку, хост из настроек — первым
 		hosts: ['https://beta.mitsu.tv/api'],
 		sports_playlist: 'https://iptv-org.github.io/iptv/countries/ru.m3u',
@@ -53,9 +53,20 @@
 		return url + (url.indexOf('?') >= 0 ? '&' : '?') + 'rjson=true';
 	}
 
-	// Кнопка в карточке фильма
+	function resumeKey(movie) {
+		return (
+			'rezka_pro_resume_' +
+			(movie.id || Lampa.Utils.hash(movie.title || movie.name || ''))
+		);
+	}
+
+	// Кнопки в карточке фильма
 	Lampa.Listener.follow('full', function (e) {
 		if (e.type == 'complite') {
+			var render = e.object.activity.render();
+			var container = render.find('.full-start-new__buttons');
+			if (!container.length) container = render.find('.full-start__buttons');
+
 			var button = $(
 				'<div class="full-start__button selector" style="background: #e67e22; border-radius: 0.3em;">' +
 					'<span>🔥 Online Pro</span>' +
@@ -70,10 +81,31 @@
 					page: 1,
 				});
 			});
-			var render = e.object.activity.render();
-			var container = render.find('.full-start-new__buttons');
-			if (!container.length) container = render.find('.full-start__buttons');
 			container.append(button);
+
+			// Продолжить с места, где остановились: сразу в плеер, минуя списки
+			var resume = Lampa.Storage.get(resumeKey(e.data.movie), null);
+			if (resume && resume.listUrl) {
+				var resumeButton = $(
+					'<div class="full-start__button selector" style="background: #2a6df4; border-radius: 0.3em;">' +
+						'<span></span>' +
+						'</div>',
+				);
+				resumeButton
+					.find('span')
+					.text('▶ Продолжить' + (resume.label ? ': ' + resume.label : ''));
+				resumeButton.on('hover:enter', function () {
+					Lampa.Activity.push({
+						url: '',
+						title: 'Online Pro',
+						component: 'rezka_pro',
+						movie: e.data.movie,
+						continue_play: true,
+						page: 1,
+					});
+				});
+				container.append(resumeButton);
+			}
 		}
 	});
 
@@ -127,6 +159,8 @@
 			var history = [];
 			var hosts = hostList();
 			var hostIndex = 0;
+			// URL текущего списка — сохраняется в закладке «Продолжить»
+			var currentListUrl = '';
 
 			function currentHost() {
 				return hosts[hostIndex];
@@ -221,8 +255,61 @@
 				scroll.append(html);
 				files.appendFiles(scroll.render());
 				scroll.minus(files.render().find('.explorer__files-head'));
-				loadStart();
+				var resume = object.continue_play
+					? Lampa.Storage.get(resumeKey(movie), null)
+					: null;
+				if (resume && resume.listUrl) resumePlay(resume);
+				else loadStart();
 			};
+
+			// Кнопка «Продолжить»: открываем сохранённый список серий и сразу
+			// запускаем ту, на которой остановились
+			function resumePlay(resume) {
+				setStatus(
+					'Продолжаю' + (resume.label ? ': ' + resume.label : '') + '...',
+					true,
+				);
+				network.silent(
+					addRjson(resume.listUrl),
+					function (json) {
+						var items = (json && (json.data || json.episodes)) || [];
+						var target = null;
+						items.forEach(function (it) {
+							if (it.method == 'link' || target) return;
+							if (resume.s) {
+								if (it.s == resume.s && it.e == resume.e) target = it;
+							} else if (
+								resume.title &&
+								(it.title || it.name) === resume.title
+							) {
+								target = it;
+							}
+						});
+						if (!target && !resume.s) {
+							items.forEach(function (it) {
+								if (!target && it.method != 'link') target = it;
+							});
+						}
+						currentListUrl = resume.listUrl;
+						if (items.length) {
+							history.push(json);
+							renderJson(json);
+						}
+						if (target) playItem(target, items);
+						else {
+							Lampa.Noty.show(
+								'Не удалось найти серию, выберите вручную.',
+							);
+							if (!items.length) loadStart();
+						}
+					},
+					function () {
+						loadStart();
+					},
+					false,
+					{ dataType: 'json' },
+				);
+			}
 
 			// Первый уровень: список доступных источников с сервера Lampac.
 			// Запомненный источник открывается сразу, список остаётся на «назад»
@@ -272,6 +359,7 @@
 				network.silent(
 					addRjson(url),
 					function (json) {
+						currentListUrl = url;
 						if (pushHistory) history.push(json);
 						renderJson(json);
 					},
@@ -371,7 +459,28 @@
 				};
 			}
 
+			// Закладка для кнопки «Продолжить» в карточке
+			function saveResume(item) {
+				try {
+					Lampa.Storage.set(resumeKey(movie), {
+						listUrl: currentListUrl,
+						s: item.s || 0,
+						e: item.e || 0,
+						title: item.title || item.name || '',
+						label: item.s
+							? item.s + ' сезон, ' + (item.e || '?') + ' серия'
+							: '',
+						time: Date.now(),
+					});
+				} catch (e) {}
+			}
+
 			function startPlayer(item, siblings) {
+				// Карточка попадает в раздел «История» на главном экране
+				try {
+					Lampa.Favorite.add('history', movie, 100);
+				} catch (e) {}
+				saveResume(item);
 				Lampa.Player.play(videoFor(item));
 				// Плейлист сезона: в плеере работают кнопки след./пред. серия
 				if (siblings && siblings.length > 1) {
